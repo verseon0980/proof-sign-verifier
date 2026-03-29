@@ -1,7 +1,6 @@
 import os
 import json
 import hashlib
-import asyncio
 import datetime
 import re
 from http.server import BaseHTTPRequestHandler
@@ -22,36 +21,40 @@ def hash_idea(idea: str) -> str:
 
 
 def parse_ai_response(raw: str) -> dict:
-    """Parse JSON from AI response, stripping markdown fences if present."""
-    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
+    clean = re.sub(r"```(?:json)?", "", raw or "").strip().rstrip("`").strip()
+    match = re.search(r'\{.*\}', clean, re.DOTALL)
+    if match:
+        clean = match.group(0)
     try:
         return json.loads(clean)
     except Exception:
-        # Fallback: return a safe default
         return {
             "title": "Idea certificate",
-            "scores": {"overall": 70, "novelty": 70, "market_gap": 70, "technical": 70, "prior_art_risk": 30},
-            "analysis": raw[:500] if raw else "Analysis unavailable.",
+            "scores": {
+                "overall": 70,
+                "novelty": 70,
+                "market_gap": 70,
+                "technical": 70,
+                "prior_art_risk": 30
+            },
+            "analysis": (raw or "")[:500] or "Analysis unavailable.",
             "similar": []
         }
 
 
-async def run_inference(idea: str, author: str) -> dict:
-    llm = og.LLM(private_key=PRIVATE_KEY)
-    llm.ensure_opg_approval(opg_amount=5.0)
+def run_inference(idea: str, author: str) -> dict:
+    client = og.init(private_key=PRIVATE_KEY)
+    client.llm.ensure_opg_approval(opg_amount=1.0)
 
-    prompt = f"""You are an AI that evaluates originality of ideas for a verifiable certificate system.
+    messages = [
+        {
+            "role": "user",
+            "content": f"""You are an AI that evaluates the originality of ideas.
 
-A user has submitted the following idea:
+A user submitted this idea:
 \"\"\"{idea}\"\"\"
 
-Your task:
-1. Search your knowledge for similar existing products, startups, and patents.
-2. Score the idea's originality across 4 dimensions (0-100 each).
-3. Write a concise analysis of what makes it unique (2-3 sentences).
-4. List 2-4 similar things that already exist, with what makes this idea different.
-
-Return ONLY valid JSON, no markdown, no extra text:
+Return ONLY valid JSON with no markdown, no extra text:
 {{
   "title": "<short 5-8 word title for this idea>",
   "scores": {{
@@ -59,28 +62,32 @@ Return ONLY valid JSON, no markdown, no extra text:
     "novelty": <integer 0-100>,
     "market_gap": <integer 0-100>,
     "technical": <integer 0-100>,
-    "prior_art_risk": <integer 0-100, where low means low risk>
+    "prior_art_risk": <integer 0-100, low means low risk>
   }},
-  "analysis": "<2-3 sentence analysis of uniqueness>",
+  "analysis": "<2-3 sentences about what makes it unique>",
   "similar": [
     {{
-      "name": "<name of similar product or patent>",
-      "difference": "<one sentence: how this idea differs from it>",
-      "risk": "low" or "medium"
+      "name": "<name of similar existing product or patent>",
+      "difference": "<one sentence on how this idea differs>",
+      "risk": "low"
     }}
   ]
 }}"""
+        }
+    ]
 
-    result = await llm.completion(
-        model=og.TEE_LLM.GPT_5,
-        prompt=prompt,
-        max_tokens=800,
-        temperature=0.2,
-        x402_settlement_mode=og.x402SettlementMode.SETTLE_METADATA
+    result = client.llm.chat(
+        model=og.TEE_LLM.GPT_4_1_2025_04_14,
+        messages=messages,
+        max_tokens=600,
+        temperature=0.2
     )
 
-    parsed = parse_ai_response(result.completion_output)
-    payment_hash = getattr(result, 'payment_hash', None)
+    raw = ""
+    if result.chat_output:
+        raw = result.chat_output.get("content", "") or ""
+
+    parsed = parse_ai_response(raw)
 
     return {
         "cert_id": generate_cert_id(),
@@ -88,9 +95,15 @@ Return ONLY valid JSON, no markdown, no extra text:
         "idea": idea,
         "idea_hash": hash_idea(idea),
         "timestamp": datetime.datetime.utcnow().strftime("%B %d, %Y · %H:%M UTC"),
-        "payment_hash": payment_hash,
+        "payment_hash": result.payment_hash,
         "title": parsed.get("title", "Idea certificate"),
-        "scores": parsed.get("scores", {}),
+        "scores": parsed.get("scores", {
+            "overall": 70,
+            "novelty": 70,
+            "market_gap": 70,
+            "technical": 70,
+            "prior_art_risk": 30
+        }),
         "analysis": parsed.get("analysis", ""),
         "similar": parsed.get("similar", [])
     }
@@ -99,7 +112,7 @@ Return ONLY valid JSON, no markdown, no extra text:
 class handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200)
-        self._set_cors()
+        self._cors()
         self.end_headers()
 
     def do_POST(self):
@@ -116,16 +129,15 @@ class handler(BaseHTTPRequestHandler):
                 self._error(400, "Author name is required.")
                 return
             if not PRIVATE_KEY:
-                self._error(500, "Server configuration error: missing OG_PRIVATE_KEY.")
+                self._error(500, "Missing OG_PRIVATE_KEY environment variable.")
                 return
 
-            result = asyncio.run(run_inference(idea, author))
-            self._json(200, result)
+            self._json(200, run_inference(idea, author))
 
         except Exception as e:
             self._error(500, str(e))
 
-    def _set_cors(self):
+    def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
@@ -135,7 +147,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", len(payload))
-        self._set_cors()
+        self._cors()
         self.end_headers()
         self.wfile.write(payload)
 
