@@ -1,5 +1,11 @@
 {
-  "rewrites": [
-    { "source": "/api/certify", "destination": "/api/certify.py" }
+  "functions": {
+    "api/certify.py": {
+      "runtime": "vercel-python@4.x"
+    }
+  },
+  "routes": [
+    { "src": "/api/certify", "dest": "/api/certify.py" },
+    { "src": "/(.*)", "dest": "/index.html" }
   ]
 }
