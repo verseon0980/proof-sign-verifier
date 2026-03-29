@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/api/certify", "destination": "/api/certify.py" }
+  ]
+}
